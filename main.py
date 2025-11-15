@@ -2,19 +2,19 @@ import os
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from datetime import datetime
 
 # --- Configuration ---
-# IMPORTANT: Replace 'YOUR_ALPHA_VANTAGE_API_KEY' with your actual free API key.
-# Get your free key here: https://www.alphavantage.co/support/#api-key
-# For permanent deployment, set this as an Environment Variable on your hosting platform!
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "demo" ) # 'demo' is for testing only
-BASE_URL = "https://www.alphavantage.co/query"
+# IMPORTANT: Replace 'YOUR_FINNHUB_API_KEY' with your actual free API key.
+# Get your free key here: https://finnhub.io/register
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "d4cbh0hr01qudf6hhukgd4cbh0hr01qudf6hhul0" )
+BASE_URL = "https://finnhub.io/api/v1"
 
 app = FastAPI(
-    title="Real-Time Market Data API Wrapper",
-    description="A simple, secure wrapper for Alpha Vantage to fetch real-time stock and crypto prices.",
+    title="Real-Time Market Data API Wrapper (Finnhub )",
+    description="A simple, secure wrapper for Finnhub to fetch real-time stock and crypto prices.",
     version="1.0.0"
- )
+)
 
 class PriceResponse(BaseModel):
     """Schema for the API response."""
@@ -22,58 +22,37 @@ class PriceResponse(BaseModel):
     price: float
     currency: str
     last_refreshed: str
-    source: str = "Alpha Vantage via Custom API"
+    source: str = "Finnhub via Custom API"
 
-def fetch_stock_price(symbol: str) -> dict:
-    """Fetches real-time stock price using Alpha Vantage Global Quote."""
+def fetch_finnhub_price(symbol: str) -> dict:
+    """Fetches real-time price using Finnhub Quote endpoint."""
     params = {
-        "function": "GLOBAL_QUOTE",
         "symbol": symbol,
-        "apikey": ALPHA_VANTAGE_API_KEY
+        "token": FINNHUB_API_KEY
     }
-    response = requests.get(BASE_URL, params=params)
+    url = f"{BASE_URL}/quote"
+    response = requests.get(url, params=params)
     data = response.json()
 
-    if "Error Message" in data:
-        raise HTTPException(status_code=404, detail=f"Symbol not found or API error: {data['Error Message']}")
+    # Finnhub returns an empty object or a specific error message for invalid symbols/keys
+    if not data or data.get("s") == "no_data":
+        raise HTTPException(status_code=404, detail=f"Could not retrieve price for symbol: {symbol}. Check if symbol is correct or if API key is valid.")
     
-    quote = data.get("Global Quote", {})
-    if not quote or not quote.get("05. price"):
-        raise HTTPException(status_code=404, detail=f"Could not retrieve price for stock symbol: {symbol}")
+    # 'c' is the current price
+    price = data.get("c")
+    timestamp = data.get("t")
+
+    if not price or price == 0:
+        raise HTTPException(status_code=404, detail=f"Could not retrieve price for symbol: {symbol}. Price data is missing or zero.")
+
+    # Convert Unix timestamp to ISO format string
+    last_refreshed = datetime.fromtimestamp(timestamp).isoformat() if timestamp else datetime.now().isoformat()
 
     return {
-        "symbol": quote.get("01. symbol"),
-        "price": float(quote.get("05. price")),
-        "currency": "USD", # Alpha Vantage Global Quote is typically in USD
-        "last_refreshed": quote.get("07. latest trading day"),
-    }
-
-def fetch_crypto_price(symbol: str) -> dict:
-    """Fetches real-time crypto price using Alpha Vantage Currency Exchange Rate."""
-    from_symbol = symbol.upper()
-    to_symbol = "USD"
-    
-    params = {
-        "function": "CURRENCY_EXCHANGE_RATE",
-        "from_currency": from_symbol,
-        "to_currency": to_symbol,
-        "apikey": ALPHA_VANTAGE_API_KEY
-    }
-    response = requests.get(BASE_URL, params=params)
-    data = response.json()
-
-    if "Error Message" in data:
-        raise HTTPException(status_code=404, detail=f"Symbol not found or API error: {data['Error Message']}")
-
-    rate_info = data.get("Realtime Currency Exchange Rate", {})
-    if not rate_info or not rate_info.get("5. Exchange Rate"):
-        raise HTTPException(status_code=404, detail=f"Could not retrieve price for crypto symbol: {symbol}")
-
-    return {
-        "symbol": from_symbol,
-        "price": float(rate_info.get("5. Exchange Rate")),
-        "currency": to_symbol,
-        "last_refreshed": rate_info.get("6. Last Refreshed"),
+        "symbol": symbol,
+        "price": price,
+        "currency": "USD", # Finnhub quotes are typically in USD
+        "last_refreshed": last_refreshed,
     }
 
 @app.get("/price/{symbol}", response_model=PriceResponse)
@@ -83,29 +62,52 @@ async def get_price(symbol: str):
     """
     upper_symbol = symbol.upper()
     
-    # Map common index names to their Alpha Vantage symbols
+    # Finnhub requires specific prefixes for indices and crypto
     INDEX_MAP = {
         "NASDAQ": "^IXIC",
         "SP500": "^GSPC",
-        "TA35": "TA35.TA" # Assuming TA35.TA is the correct symbol for Tel Aviv 35 on Alpha Vantage
+        "TA35": "TA35.TA" # Finnhub might not support this, but we keep the mapping for consistency
     }
     
+    # Finnhub Crypto symbols are typically in the format 'BINANCE:BTCUSDT'
+    # We will try to map common crypto symbols to a common exchange (e.g., BINANCE)
+    CRYPTO_MAP = {
+        "BTC": "BINANCE:BTCUSDT",
+        "ETH": "BINANCE:ETHUSDT",
+        "XRP": "BINANCE:XRPUSDT",
+        "LTC": "BINANCE:LTCUSDT",
+        "ADA": "BINANCE:ADAUSDT",
+        "SOL": "BINANCE:SOLUSDT",
+        "DOGE": "BINANCE:DOGEUSDT",
+    }
+
+    # 1. Check for Index mapping
     if upper_symbol in INDEX_MAP:
-        upper_symbol = INDEX_MAP[upper_symbol]
-        is_crypto = False
+        finnhub_symbol = INDEX_MAP[upper_symbol]
+    # 2. Check for Crypto mapping
+    elif upper_symbol in CRYPTO_MAP:
+        finnhub_symbol = CRYPTO_MAP[upper_symbol]
+    # 3. Assume it's a standard stock ticker
     else:
-        # Simple heuristic to distinguish between common crypto and stock symbols
-        is_crypto = upper_symbol in ["BTC", "ETH", "XRP", "LTC", "ADA", "SOL", "DOGE"] or len(upper_symbol) <= 4
+        finnhub_symbol = upper_symbol
 
     try:
-        # Try fetching as stock first (this covers mapped indices too)
-        return fetch_stock_price(upper_symbol)
+        # Try fetching the price with the determined Finnhub symbol
+        return fetch_finnhub_price(finnhub_symbol)
     except HTTPException as e:
-        # If stock/index fails, try fetching as crypto
-        try:
-            return fetch_crypto_price(upper_symbol)
-        except HTTPException:
-            raise e # Re-raise the original stock/index error if crypto also fails
+        # If the first attempt fails, try a fallback for common symbols
+        if upper_symbol not in INDEX_MAP and upper_symbol not in CRYPTO_MAP:
+            # Fallback: If it was a stock, try a common crypto format (e.g., for short symbols)
+            if len(upper_symbol) <= 4:
+                try:
+                    finnhub_symbol_fallback = CRYPTO_MAP.get(upper_symbol, f"BINANCE:{upper_symbol}USDT")
+                    return fetch_finnhub_price(finnhub_symbol_fallback)
+                except HTTPException:
+                    raise e # Re-raise the original error
+            else:
+                raise e # Re-raise the original error
+        else:
+            raise e # Re-raise the original error
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
