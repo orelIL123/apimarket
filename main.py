@@ -2,6 +2,9 @@ import os
 import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
+from fastapi_cache.decorator import cache
 from datetime import datetime
 
 # --- Configuration ---
@@ -10,11 +13,19 @@ from datetime import datetime
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "d4cbh0hr01qudf6hhukgd4cbh0hr01qudf6hhul0" )
 BASE_URL = "https://finnhub.io/api/v1"
 
+# Cache configuration
+CACHE_TTL = 15 # Time to Live in seconds (15 seconds minimum for 13 symbols on Finnhub free tier )
+CACHE_KEY_PREFIX = "finnhub_price"
+
 app = FastAPI(
-    title="Real-Time Market Data API Wrapper (Finnhub )",
+    title="Real-Time Market Data API Wrapper (Finnhub)",
     description="A simple, secure wrapper for Finnhub to fetch real-time stock and crypto prices.",
     version="1.0.0"
 )
+
+@app.on_event("startup")
+async def startup():
+    FastAPICache.init(InMemoryBackend(), prefix=CACHE_KEY_PREFIX)
 
 class PriceResponse(BaseModel):
     """Schema for the API response."""
@@ -56,6 +67,7 @@ def fetch_finnhub_price(symbol: str) -> dict:
     }
 
 @app.get("/price/{symbol}", response_model=PriceResponse)
+@cache(expire=CACHE_TTL)
 async def get_price(symbol: str):
     """
     Fetches the real-time price for a given stock, index, or cryptocurrency symbol.
